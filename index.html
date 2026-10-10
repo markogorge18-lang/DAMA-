@@ -419,7 +419,7 @@ function teardown() {
 }
 function startApp() {
   $('#auth').hidden = true; $('#app').hidden = false;
-  $('#empty').innerHTML = `${logo(120)}<h2 style="color:var(--text);letter-spacing:.14em">DAMA</h2><p>اختر محادثة لبدء التواصل<br><small> جميع الدرتشات محمية     </small></p>`;
+  $('#empty').innerHTML = `${logo(120)}<h2 style="color:var(--text);letter-spacing:.14em">DAMA</h2><p>اختر محادثة لبدء التواصل<br><small>المحادثات تخضع لإشراف إدارة التطبيق لحماية الطلاب</small></p>`;
   getDoc(doc(db, 'admins', uid)).then(s => { isAdmin = s.exists(); if (tab === 'settings') renderTab();
     if (adminTry) { adminTry = false; if (isAdmin) setTimeout(openAdmin, 900); else { toast('الحساب ده مش أدمن'); signOut(auth).catch(() => {}); } } }).catch(() => { adminTry = false; });
   unsubs.push(onSnapshot(doc(db, 'users', uid), s => { if (s.exists()) { me = {id: uid, ...s.data()}; ucache.set(uid, me); if (me.banned) bannedScreen(); } }, console.error));
@@ -1002,14 +1002,15 @@ async function openAdmin() {
   if (!isAdmin) return; closeOvQuiet(); curKind = 'admin'; ovBack = null;
   ov(`<header class="bar"><button class="ib" data-a="close" aria-label="رجوع">${ic('back')}</button><div class="ttl"><b>لوحة المطور <span class="crown">♛</span></b><small>صلاحيات المشرف</small></div></header><div class="scroll" id="adm"><div class="empty-note">جارٍ التحميل...</div></div>`);
   try {
-    const cnt = async n => (await getCountFromServer(collection(db, n))).data().count;
+    const cnt = async n => { try { return (await getCountFromServer(collection(db, n))).data().count; } catch (e) { return '؟'; } };
+    const emptyQ = {docs: []};
     const [u, c, st, rc] = await Promise.all([cnt('users'), cnt('channels'), cnt('stories'), cnt('reports')]);
-    const rps = await getDocs(query(collection(db, 'reports'), orderBy('ts', 'desc'), limit(30)));
-    const sts = await getDocs(query(collection(db, 'stories'), where('exp', '>', Date.now()), limit(50)));
+    const rps = await getDocs(query(collection(db, 'reports'), orderBy('ts', 'desc'), limit(30))).catch(() => emptyQ);
+    const sts = await getDocs(query(collection(db, 'stories'), where('exp', '>', Date.now()), limit(50))).catch(() => emptyQ);
     const us = await getDocs(query(collection(db, 'users'), orderBy('createdAt', 'desc'), limit(50)));
     if (curKind !== 'admin') return;
     $('#adm').innerHTML = `<div class="stat"><div><b>${u}</b><span>المستخدمون</span></div><div><b>${c}</b><span>القنوات</span></div><div><b>${st}</b><span>القصص</span></div><div><b>${chanList.filter(x => x.verified).length}</b><span>قنوات موثقة</span></div><div><b>${rc}</b><span>بلاغات</span></div></div>
-      <button class="btn pri" data-a="allchats" style="margin:12px 16px;width:calc(100% - 32px)">عرض كل المحادثات (قراءة فقط)</button>
+      <button class="btn pri" data-a="allchats" style="margin:12px 16px;width:calc(100% - 32px)">عرض كل المحادثات والتحكم فيها</button>
       <div class="lbl" style="margin:12px 16px">البلاغات</div>${rps.docs.map(d => { const r = d.data(); const body = r.t === 'text' ? esc(r.x) : r.t === 'img' && r.x && r.x.startsWith('data:image') ? `<img src="${esc(r.x)}" style="max-width:160px;border-radius:8px;display:block">` : '[' + esc(r.t) + ']'; return `<div class="urow" style="flex-wrap:wrap"><div class="n" style="flex-basis:100%"><b>${esc(r.fromName || '')}</b><small>أبلغ: ${esc(r.byName || '')}</small><div style="margin-top:6px">${body}</div></div><button class="btn sm danger" data-a="rdel" data-id="${d.id}">حذف الرسالة</button><button class="btn sm danger" data-a="rban" data-id="${d.id}" data-u="${esc(r.from)}">حظر المرسل</button><button class="btn sm out" data-a="rdis" data-id="${d.id}">تجاهل</button></div>`; }).join('') || '<div class="empty-note">لا توجد بلاغات</div>'}
       <div class="lbl" style="margin:12px 16px">القصص النشطة</div>${sts.docs.map(d => { const x = d.data(); return `<div class="urow"><div class="n"><b>${esc(x.name)}</b><small>${esc((x.text || '').slice(0, 40))}</small></div><button class="ib" data-a="admstory" data-id="${d.id}" style="color:var(--danger)" aria-label="حذف">${ic('trash')}</button></div>`; }).join('') || '<div class="empty-note">لا توجد قصص</div>'}
       <div class="lbl" style="margin:12px 16px">القنوات</div>${chanList.map(ch => `<div class="urow"><div class="n"><b>${esc(ch.name)}</b><small>${(ch.followers || []).length} مشترك</small></div><button class="btn sm ${ch.verified ? 'out' : 'pri'}" data-a="verify" data-id="${ch.id}">${ch.verified ? 'إلغاء التوثيق' : 'توثيق'}</button><button class="ib" data-a="delchan" data-id="${ch.id}" data-adm="1" style="color:var(--danger)" aria-label="حذف">${ic('trash')}</button></div>`).join('') || '<div class="empty-note">لا توجد قنوات</div>'}
@@ -1179,6 +1180,46 @@ document.addEventListener('keydown', e => {
 
 init();
 
+
+/* ---------- التحديث التلقائي ---------- */
+(function autoUpdate() {
+  if (!/^https?:$/.test(location.protocol)) return;
+  let base = null, shown = false;
+  const hash = t => { let h = 5381; for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; return h + ':' + t.length; };
+  const typing = () => { const a = document.activeElement; return a && /^(INPUT|TEXTAREA)$/.test(a.tagName) && a.value && a.value.length > 0; };
+  const reload = () => { location.replace(location.pathname + '?v=' + Date.now()); };
+  const banner = () => {
+    shown = true; let n = 6;
+    const b = document.createElement('div');
+    b.style.cssText = 'position:fixed;left:12px;right:12px;bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:99999;background:#1f6bff;color:#fff;border-radius:16px;padding:12px 16px;display:flex;align-items:center;gap:12px;box-shadow:0 8px 30px rgba(0,0,0,.45);font-weight:600';
+    b.innerHTML = '<span style="flex:1" id="upT"></span><button id="upB" style="background:#fff;color:#1f6bff;border:0;border-radius:10px;padding:8px 14px;font-weight:700;font-family:inherit">تحديث الآن</button>';
+    document.body.appendChild(b);
+    b.querySelector('#upB').onclick = reload;
+    const tick = () => { if (typing()) { b.querySelector('#upT').textContent = 'يوجد تحديث جديد — هيتم بعد ما تخلّص الكتابة'; return setTimeout(tick, 1500); }
+      b.querySelector('#upT').textContent = 'يوجد تحديث جديد · جارٍ التحديث خلال ' + n + ' ث'; if (n-- <= 0) return reload(); setTimeout(tick, 1000); };
+    tick();
+  };
+  let fast = null, tick = 0;
+  const sig = r => r.headers.get('etag') || r.headers.get('last-modified') || null;
+  const check = async () => {
+    if (shown) return; tick++;
+    try {
+      if (fast !== false) {
+        const r = await fetch(location.pathname + '?chk=' + Date.now(), {method: 'HEAD', cache: 'no-store'});
+        const sg = r.ok ? sig(r) : null;
+        if (sg) { fast = true; if (base === null) base = sg; else if (sg !== base) banner(); return; }
+        fast = false;
+      }
+      if (tick % 5 && base !== null) return;
+      const r = await fetch(location.pathname + '?chk=' + Date.now(), {cache: 'no-store'}); if (!r.ok) return;
+      const h = hash(await r.text());
+      if (base === null) base = h; else if (h !== base) banner();
+    } catch (e) {}
+  };
+  check(); setInterval(check, 3000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+  window.addEventListener('focus', check); window.addEventListener('online', check);
+})();
 </script>
 </body>
 </html>
